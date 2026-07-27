@@ -2,4 +2,4 @@
 #include <windows.h>
 #include <string>
 
-bool dllInject(DWORD pid, std::wstring& directoryPath, std::string& output);
+bool LoadLibraryDllInject(DWORD pid, std::wstring& directoryPath, std::string& output);

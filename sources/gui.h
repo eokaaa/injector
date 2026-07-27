@@ -4,7 +4,7 @@
 
 inline bool windowExit = true;
 
-constexpr inline int width  = 450;
-constexpr inline int heigth = 350;
+constexpr inline int width  = 380;
+constexpr inline int heigth = 470;
 
 void window();

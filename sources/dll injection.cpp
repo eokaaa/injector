@@ -1,11 +1,14 @@
 #include "../imgui/imgui.h"
 #include "../imgui/imgui_impl_win32.h"
 #include "../imgui/imgui_impl_dx11.h"
+
 #include <windows.h>
 #include <tlhelp32.h>
 #include <string>
+#include <fstream>
+#include <vector>
 
-bool dllInject(DWORD pid, std::wstring& directoryPath, std::string& output)
+bool LoadLibraryDllInject(DWORD pid, std::wstring& directoryPath, std::string& output)
 {
 	if (directoryPath.empty())
 	{
@@ -70,3 +73,4 @@ bool dllInject(DWORD pid, std::wstring& directoryPath, std::string& output)
 	output = "[+] Инъекция dll прошла успешно";
 	return true;
 }
+
