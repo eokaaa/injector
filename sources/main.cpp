@@ -1,5 +1,5 @@
 #include <windows.h>
-#include "gui.h"
+#include "gui/gui.h"
 
 int APIENTRY WinMain(
 	HINSTANCE hInst, 

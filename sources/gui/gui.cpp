@@ -1,17 +1,17 @@
-#include "../imgui/imgui.h"
-#include "../imgui/imgui_impl_win32.h"
-#include "../imgui/imgui_impl_dx11.h"
-#include "../imgui/imgui_internal.h"
+#include "../../imgui/imgui.h"
+#include "../../imgui/imgui_impl_win32.h"
+#include "../../imgui/imgui_impl_dx11.h"
+#include "../../imgui/imgui_internal.h"
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <filesystem>
 #include <algorithm>
 #include <vector>
 #include "gui.h"
-#include "searchDLL.h"
-#include "searchPID.h"
-#include "dll injection.h"
-#include "..\\resource.h"
+#include "../search/searchDLL.h"
+#include "../search/searchPID.h"
+#include "../core/dll injection.h"
+#include "../../resource.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -318,7 +318,10 @@ void window()
             else if (selectedPid == 0)
                 outputFalls = "Ошибка: процесс не выбран или не запущен";
             else
-                LoadLibraryDllInject(selectedPid, directoryPathForDll, outputFalls);
+            {
+                outputFalls = "";
+                ManualMapDllInject(selectedPid, directoryPathForDll, outputFalls);
+            }
 
             onClicedButtonForInjectDll++;
         }
