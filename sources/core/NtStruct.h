@@ -66,3 +66,79 @@ typedef NTSTATUS(NTAPI* pfnNtQueryAttributesFile)(
 	POBJECT_ATTRIBUTES ObjectAttributes,
 	PFILE_BASIC_INFORMATION FileInformation
 );
+
+typedef struct _MY_CLIENT_ID 
+{
+	HANDLE UniqueProcess;
+	HANDLE UniqueThread;
+} MY_CLIENT_ID, * MY_PCLIENT_ID;
+
+typedef NTSTATUS(NTAPI* pfnNtOpenProcess)(
+	PHANDLE            ProcessHandle,
+	ACCESS_MASK        DesiredAccess,
+	POBJECT_ATTRIBUTES ObjectAttributes,
+	MY_PCLIENT_ID	   ClientId
+);
+
+typedef NTSTATUS(NTAPI* pfnNtOpenThread)(
+	PHANDLE            ThreadHandle,
+	ACCESS_MASK        DesiredAccess,
+	POBJECT_ATTRIBUTES ObjectAttributes,
+	MY_PCLIENT_ID	   ClientId
+);
+
+typedef NTSTATUS(NTAPI* pfnNtClose)(
+	HANDLE Handle
+);
+
+typedef NTSTATUS(NTAPI* pfnNtAllocateVirtualMemory)(
+	HANDLE		ProcessHandle, 
+	PVOID*		BaseAddress,
+	ULONG_PTR	ZeroBits,      
+	PSIZE_T		RegionSize,    
+	ULONG		AllocationType,
+	ULONG		Protect        
+);
+
+typedef NTSTATUS(NTAPI* pfnNtWriteVirtualMemory)(
+	HANDLE		ProcessHandle,
+	PVOID		BaseAddress,
+	PVOID		Buffer,
+	ULONG		NumberOfBytesToWrite,
+	PULONG		NumberOfBytesWritten
+);
+
+typedef NTSTATUS(NTAPI* qfnNtFreeVirtualMemory)(
+	HANDLE		ProcessHandle,
+	PVOID*		BaseAddress,
+	PSIZE_T		RegionSize,
+	ULONG		FreeType
+);
+
+typedef NTSTATUS(NTAPI* pfnNtProtectVirtualMemory)(
+	IN HANDLE               ProcessHandle,
+	IN OUT PVOID*			BaseAddress,
+	IN OUT PSIZE_T          RegionSize,
+	IN ULONG                NewProtect,
+	OUT PULONG              OldProtect 
+);
+
+typedef NTSTATUS(NTAPI* pfnNtSuspendThread)(
+	HANDLE ThreadHandle,
+	PULONG PreviousSuspendCount OPTIONAL
+);
+
+typedef NTSTATUS(NTAPI* pfnNtGetContextThread)(
+	HANDLE ThreadHandle,
+	PCONTEXT ThreadContext
+);
+
+typedef NTSTATUS(NTAPI* pfnNtSetContextThread)(
+	HANDLE ThreadHandle,
+	PCONTEXT ThreadContext
+);
+
+typedef NTSTATUS(NTAPI* pfnNtResumeThread)(
+	HANDLE ThreadHandle,
+	PULONG PreviousSuspendCount OPTIONAL
+);

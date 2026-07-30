@@ -5,6 +5,7 @@
 #include "ParseModules.h"
 #include "dll injection.h"
 
+/*
 bool LoadLibraryDllInject(DWORD pid, std::wstring& directoryPath, std::string& output)
 {
 	if (directoryPath.empty())
@@ -70,13 +71,13 @@ bool LoadLibraryDllInject(DWORD pid, std::wstring& directoryPath, std::string& o
 	output = "[+] Инъекция dll прошла успешно";
 	return true;
 }
-
+*/
 
 
 uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& output, std::wstring PathExe)
 {
-	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, 0, pid);
-	if (!hProcess)
+	HANDLE hProcess;
+	if (!SilentOpenProcess(pid, &hProcess))
 	{
 		output = "[!] При открытии процесса произошла ошибка";
 		return false;
@@ -87,7 +88,7 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	if (!QueryFullProcessImageNameW(hProcess, 0, PathExe.data(), &Size))
 	{
 		output = "[!] Не удалось получить путь к файлу";
-		CloseHandle(hProcess);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 	PathExe.resize(Size);	
@@ -96,14 +97,14 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	if (!GetStructFile(PathExe, ExeFileStruct))
 	{
 		output = "[!] Не удалось прочитать структуру [EXE]";
-		CloseHandle(hProcess);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 	std::vector<uint8_t> DllFileStruct;
 	if (!GetStructFile(PathDll, DllFileStruct))
 	{
 		output = "[!] Не удалось прочитать структуру [DLL]";
-		CloseHandle(hProcess);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
@@ -113,7 +114,7 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		ExeImageNT->Signature != IMAGE_NT_SIGNATURE)
 	{
 		output = "[!] Это не PE структура [EXE]";
-		CloseHandle(hProcess);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
@@ -123,14 +124,14 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		DllImageNT->Signature != IMAGE_NT_SIGNATURE)
 	{
 		output = "[!] Это не PE структура [DLL]";
-		CloseHandle(hProcess);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
 	if (DllImageNT->FileHeader.Machine != ExeImageNT->FileHeader.Machine)
 	{
 		output = "[!] Архитектура должна совпадать";
-		CloseHandle(hProcess);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
@@ -161,15 +162,17 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		ImportData = DllImageNT32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
 	}
 
-	LPVOID VirtualAllocate = VirtualAllocEx(hProcess, nullptr, DllSizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-	if (!VirtualAllocate)
+	PVOID pBaseAddress = NULL;
+	
+	LPVOID VirtualAllocateDll = SilentAllocate(hProcess, &pBaseAddress, 0, &DllSizeOfImage, MEM_COMMIT | MEM_RESERVE);
+	if (!VirtualAllocateDll)
 	{
 		output = "[!] Не удалось выделить память для dll";
-		CloseHandle(hProcess);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
-	uintptr_t MemoryAllocate = reinterpret_cast<uintptr_t>(VirtualAllocate);
+	uintptr_t MemoryAllocate = reinterpret_cast<uintptr_t>(VirtualAllocateDll);
 
 	std::vector<uint8_t> LocalImage(DllSizeOfImage, 0);
 	std::memcpy(LocalImage.data(), DllFileStruct.data(), DllSizeOfHeaders);
@@ -192,72 +195,116 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	if (!ChangeValidAddress(MemoryAllocate, DllImageBase, LocalImageData, RelocData))
 	{
 		output = "[!] Ошибка при парсинге .reloc";
-		VirtualFreeEx(hProcess, VirtualAllocate, 0, MEM_RELEASE);
-		CloseHandle(hProcess);
+		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
 
 	if (!ParseImports(ImportData, LocalImageData, pid, PathDll, output, PathExe))
 	{
-		VirtualFreeEx(hProcess, VirtualAllocate, 0, MEM_RELEASE);
-		CloseHandle(hProcess);
+		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
-	if (!WriteProcessMemory(hProcess, VirtualAllocate, LocalImage.data(), DllSizeOfHeaders, 0))
+	if (!SilentWriteProcess(hProcess, VirtualAllocateDll, LocalImage.data(), DllSizeOfImage, 0))
 	{
 		output = "[!] Ошибка при записи заголовка";
-		VirtualFreeEx(hProcess, VirtualAllocate, 0, MEM_RELEASE);
+		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
+		SilentCloseHandle(hProcess);
+		return false;
+	}
+
+	DWORD TID = GetThreadID(pid);
+	HANDLE hThread;
+	if (!SilentOpenThread(TID, &hThread))
+	{
+		output = "[!] При открытии потока произошла ошибка";
+		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
 		CloseHandle(hProcess);
 		return false;
 	}
 
-	CloseHandle(hProcess);
-	output = "[+] DLL была успешно внедрена в EXE";
-	return MemoryAllocate;
-}
+	ULONG SuspendCount = INFINITE;
 
+	SilentSuspendThread(hThread);
 
-/*
+	CONTEXT ContextThread;
+	ContextThread.ContextFlags = CONTEXT_CONTROL;
+
+	if (!SilentGetContextThread(hThread, &ContextThread))
+	{
+		output = "[!] При получении контекста потока произошла ошибка";
+		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
+		CloseHandle(hProcess);
+		return false;
+	}
+
 	MANUAL_MAP_MAIN MapData = {};
-	MapData.HinstDLL = (HINSTANCE)VirtualAllocate;
-	MapData.FdwReason= DLL_PROCESS_ATTACH;
+	MapData.HinstDLL = (HINSTANCE)VirtualAllocateDll;
+	MapData.FdwReason = DLL_PROCESS_ATTACH;
 	MapData.lpvReserved = nullptr;
+	MapData.RIP = ContextThread.Rip;
 
-	size_t ShellCodeSize = (uintptr_t)ShellCodeEnd - (uintptr_t)ShellCode;
+	size_t ShellCodeSize = 1024;
 	size_t ParamSize = sizeof(MANUAL_MAP_MAIN);
 	size_t TotalSize = (ShellCodeSize + ParamSize);
 
-	LPVOID ShellCodeAlloc = VirtualAllocEx(hProcess, nullptr, TotalSize, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+	PVOID pBaseAddressShellCode = NULL;
+
+	LPVOID ShellCodeAlloc = SilentAllocate(hProcess, &pBaseAddressShellCode, 0, &TotalSize, MEM_COMMIT | MEM_RESERVE);
 	if (!ShellCodeAlloc)
 	{
 		output = "[!] Не удалось выделить память для шеллкода";
+		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
 		CloseHandle(hProcess);
 		return false;
 	}
 
 	LPVOID ParamAlloc = (LPVOID)((uintptr_t)ShellCodeAlloc + ShellCodeSize);
 
-	if (!WriteProcessMemory(hProcess, ShellCodeAlloc, (LPCVOID)ShellCode, ShellCodeSize, 0) ||
-		!WriteProcessMemory(hProcess, ParamAlloc, &MapData, ParamSize, 0))
+	if (!SilentWriteProcess(hProcess, ShellCodeAlloc, ShellCode, ShellCodeSize, 0) ||
+		!SilentWriteProcess(hProcess, ParamAlloc, &MapData, ParamSize, 0))
 	{
 		output = "[!] Ошибка при записи шеллкода или параметров";
-		VirtualFreeEx(hProcess, ShellCodeAlloc, 0, MEM_RELEASE);
-		VirtualFreeEx(hProcess, VirtualAllocate, 0, MEM_RELEASE);
+		SilentFreeAllocate(hProcess, &ShellCodeAlloc);
+		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
 		CloseHandle(hProcess);
 		return false;
 	}
 
-	WaitForSingleObject(hProcess, INFINITE);
-	VirtualFreeEx(hProcess, ShellCodeAlloc, 0, MEM_DECOMMIT);
+	ULONG OldProtect = 0;
+	SilientProtectMemory(hProcess, &ShellCodeAlloc, TotalSize, PAGE_EXECUTE_READWRITE, &OldProtect);
+
+	uintptr_t RIP = ContextThread.Rip;
+
+	ContextThread.Rip = (uintptr_t)ShellCodeAlloc;
+	ContextThread.Rdx = (uintptr_t)ParamAlloc;
+	ContextThread.Rsp -= 0x28;
+
+	if (!SilentSetContextThread(hThread, &ContextThread))
+	{
+		output = "[!] Ошибка при установке контекста";
+		SilentFreeAllocate(hProcess, &ShellCodeAlloc);
+		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
+		CloseHandle(hProcess);
+		return false;
+	}
+
+	SilentResumeThread(hThread);
+	SilentSetContextThread(hThread, &ContextThread);
+	Sleep(1000);
+	SilentCloseHandle(hThread);
 
 	std::vector<uint8_t> ZeroBuffer(DllSizeOfHeaders, 0);
-	if (!WriteProcessMemory(hProcess, VirtualAllocate, ZeroBuffer.data(), DllSizeOfHeaders, 0))
-	{
-		output = "[!] Ошибка при обнулении заголовков";
-		VirtualFreeEx(hProcess, VirtualAllocate, 0, MEM_RELEASE);
-		CloseHandle(hProcess);
-		return false;
-	}
-*/
+	SilientProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfHeaders, PAGE_READWRITE, &OldProtect);
+	SilentWriteProcess(hProcess, &VirtualAllocateDll, ZeroBuffer.data(), DllSizeOfHeaders, 0);
+	SilientProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfHeaders, OldProtect, &OldProtect);
+
+	SilentFreeAllocate(hProcess, &ShellCodeAlloc);
+
+	SilentCloseHandle(hProcess);
+	output = "[+] DLL была успешно внедрена в EXE";
+	return MemoryAllocate;
+}
