@@ -36,20 +36,21 @@ typedef struct _FULL_PEB_LDR_DATA
 
 typedef struct _MY_RTL_USER_PROCESS_PARAMETERS
 {
-	ULONG MaximumLength;          // 0x0
-	ULONG Length;                 // 0x4
-	ULONG Flags;                  // 0x8
-	ULONG DebugFlags;             // 0xc
+	ULONG MaximumLength;          // 0x00
+	ULONG Length;                 // 0x04
+	ULONG Flags;                  // 0x08
+	ULONG DebugFlags;             // 0x0C
 	VOID* ConsoleHandle;          // 0x10
+	ULONG ConsoleFlags;           // 0x18
+	ULONG _Pad0;                  // 0x1C
 	VOID* StandardInput;          // 0x20
 	VOID* StandardOutput;         // 0x28
 	VOID* StandardError;          // 0x30
-
-	BYTE PADDING[0x28];
-
-	struct _UNICODE_STRING ImagePathName; // 0x60
-	struct _UNICODE_STRING CommandLine; // 0x70
+	BYTE  PADDING[0x28];          // 0x38 → 0x60
+	UNICODE_STRING ImagePathName; // 0x60
+	UNICODE_STRING CommandLine;   // 0x70
 	VOID* Environment;            // 0x80
+
 } MY_RTL_USER_PROCESS_PARAMETERS, * MY_PRTL_USER_PROCESS_PARAMETERS;
 
 
@@ -98,6 +99,14 @@ typedef NTSTATUS(NTAPI* pfnNtAllocateVirtualMemory)(
 	PSIZE_T		RegionSize,    
 	ULONG		AllocationType,
 	ULONG		Protect        
+);
+
+typedef NTSTATUS (NTAPI* pfnNtReadVirtualMemory)(
+	HANDLE		ProcessHandle,
+	PVOID		BaseAddress,
+	PVOID		Buffer,
+	SIZE_T		NumberOfBytesToRead,
+	PSIZE_T		NumberOfBytesRead
 );
 
 typedef NTSTATUS(NTAPI* pfnNtWriteVirtualMemory)(

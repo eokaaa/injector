@@ -74,8 +74,14 @@ bool LoadLibraryDllInject(DWORD pid, std::wstring& directoryPath, std::string& o
 */
 
 
+extern "C" void ShellCode(MANUAL_MAP_MAIN* pData);
+extern "C" void ShellCodeEnd();
+
 uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& output, std::wstring PathExe)
 {
+	MappedModules.clear();
+	LocalImagesCache.clear();
+
 	HANDLE hProcess;
 	if (!SilentOpenProcess(pid, &hProcess))
 	{
@@ -138,8 +144,12 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	uintptr_t DllImageBase = 0;
 	size_t  DllSizeOfImage = 0;
 	size_t  DllSizeOfHeaders = 0;
+	uintptr_t DllEntryPoint = 0;
+
 	IMAGE_DATA_DIRECTORY RelocData;
 	IMAGE_DATA_DIRECTORY ImportData;
+	IMAGE_DATA_DIRECTORY TLSData;
+	IMAGE_DATA_DIRECTORY ExceptionData;
 
 	bool DllIs64 = (DllImageNT->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC);
 
@@ -149,8 +159,12 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		DllImageBase = DllImageNT64->OptionalHeader.ImageBase;
 		DllSizeOfImage = DllImageNT64->OptionalHeader.SizeOfImage;
 		DllSizeOfHeaders = DllImageNT64->OptionalHeader.SizeOfHeaders;
+		DllEntryPoint = DllImageNT64->OptionalHeader.AddressOfEntryPoint;
+
 		RelocData = DllImageNT64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
 		ImportData = DllImageNT64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+		TLSData = DllImageNT64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+		ExceptionData = DllImageNT64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
 	}
 	else
 	{
@@ -158,8 +172,12 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		DllImageBase = DllImageNT32->OptionalHeader.ImageBase;
 		DllSizeOfImage = DllImageNT32->OptionalHeader.SizeOfImage;
 		DllSizeOfHeaders = DllImageNT32->OptionalHeader.SizeOfHeaders;
+		DllEntryPoint = DllImageNT32->OptionalHeader.AddressOfEntryPoint;
+
 		RelocData = DllImageNT32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
 		ImportData = DllImageNT32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+		TLSData = DllImageNT32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+		ExceptionData = DllImageNT32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
 	}
 
 	PVOID pBaseAddress = NULL;
@@ -192,7 +210,7 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 
 	uintptr_t LocalImageData = reinterpret_cast<uintptr_t>(LocalImage.data());
 
-	if (!ChangeValidAddress(MemoryAllocate, DllImageBase, LocalImageData, RelocData))
+	if (!ParseReloc(MemoryAllocate, DllImageBase, LocalImageData, RelocData))
 	{
 		output = "[!] Ошибка при парсинге .reloc";
 		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
@@ -201,8 +219,9 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	}
 
 
-	if (!ParseImports(ImportData, LocalImageData, pid, PathDll, output, PathExe))
+	if (!ParseImports(ImportData, LocalImageData, DllSizeOfImage, hProcess, PathDll, output, PathExe))
 	{
+		output = "[!] Ошибка при парсинге импортов";
 		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
 		SilentCloseHandle(hProcess);
 		return false;
@@ -215,6 +234,9 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		SilentCloseHandle(hProcess);
 		return false;
 	}
+
+	ULONG OldProtect = 0;
+	SilientProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfImage, PAGE_EXECUTE_READWRITE, &OldProtect);
 
 	DWORD TID = GetThreadID(pid);
 	HANDLE hThread;
@@ -231,7 +253,7 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	SilentSuspendThread(hThread);
 
 	CONTEXT ContextThread;
-	ContextThread.ContextFlags = CONTEXT_CONTROL;
+	ContextThread.ContextFlags = CONTEXT_FULL;
 
 	if (!SilentGetContextThread(hThread, &ContextThread))
 	{
@@ -242,12 +264,39 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	}
 
 	MANUAL_MAP_MAIN MapData = {};
+	IMAGE_DATA_DIRECTORY ExceptionDir = DllImageNT->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
+
 	MapData.HinstDLL = (HINSTANCE)VirtualAllocateDll;
 	MapData.FdwReason = DLL_PROCESS_ATTACH;
 	MapData.lpvReserved = nullptr;
-	MapData.RIP = ContextThread.Rip;
+	MapData.EntryPoint = DllEntryPoint;
+	MapData.Done = 0;
+	if (ExceptionData.VirtualAddress != 0 && ExceptionData.Size != 0)
+	{
+		MapData.FunctionTable = (PVOID)(MemoryAllocate + ExceptionDir.VirtualAddress);
+		MapData.EntryCount = ExceptionDir.Size / sizeof(IMAGE_RUNTIME_FUNCTION_ENTRY);
+		MapData.BaseAddress = (PVOID)MemoryAllocate;
+		MapData.RtlAddFunctionTable = (PVOID)GetProcAddressByName(SilentSearchDll("ntdll.dll"), "RtlAddFunctionTable", PathExe);
+	}
 
-	size_t ShellCodeSize = 1024;
+	if (TLSData.Size != 0 && TLSData.VirtualAddress != 0)
+	{
+		auto pTLS = reinterpret_cast<PIMAGE_TLS_DIRECTORY>(LocalImageData + TLSData.VirtualAddress);
+		if (pTLS->AddressOfCallBacks != 0)
+		{
+			ULONG_PTR RVA = pTLS->AddressOfCallBacks - DllImageBase;
+			MapData.TLSCallbacks = pTLS->AddressOfCallBacks;
+		}
+	}
+
+	if (!MapData.RtlAddFunctionTable || !MapData.TLSCallbacks)
+	{
+		output = "[!] RtlAddFunctionTable/TLSCallbacks не найдена";
+		return false;
+	}
+
+
+	size_t ShellCodeSize = (uintptr_t)ShellCodeEnd - (uintptr_t)ShellCode;
 	size_t ParamSize = sizeof(MANUAL_MAP_MAIN);
 	size_t TotalSize = (ShellCodeSize + ParamSize);
 
@@ -264,7 +313,7 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 
 	LPVOID ParamAlloc = (LPVOID)((uintptr_t)ShellCodeAlloc + ShellCodeSize);
 
-	if (!SilentWriteProcess(hProcess, ShellCodeAlloc, ShellCode, ShellCodeSize, 0) ||
+	if (!SilentWriteProcess(hProcess, ShellCodeAlloc, (void*)ShellCode, ShellCodeSize, 0) ||
 		!SilentWriteProcess(hProcess, ParamAlloc, &MapData, ParamSize, 0))
 	{
 		output = "[!] Ошибка при записи шеллкода или параметров";
@@ -274,14 +323,16 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		return false;
 	}
 
-	ULONG OldProtect = 0;
 	SilientProtectMemory(hProcess, &ShellCodeAlloc, TotalSize, PAGE_EXECUTE_READWRITE, &OldProtect);
 
 	uintptr_t RIP = ContextThread.Rip;
 
+	ContextThread.Rcx = (uintptr_t)ParamAlloc;
+	ContextThread.Rsp &= ~0xFull;
+	ContextThread.Rsp -= 0x8;
 	ContextThread.Rip = (uintptr_t)ShellCodeAlloc;
-	ContextThread.Rdx = (uintptr_t)ParamAlloc;
-	ContextThread.Rsp -= 0x28;
+
+	SilentWriteProcess(hProcess, (PVOID)ContextThread.Rsp, &RIP, sizeof(uintptr_t), 0);
 
 	if (!SilentSetContextThread(hThread, &ContextThread))
 	{
@@ -293,17 +344,25 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	}
 
 	SilentResumeThread(hThread);
-	SilentSetContextThread(hThread, &ContextThread);
-	Sleep(1000);
-	SilentCloseHandle(hThread);
+
+	DWORD done = 0;
+	SIZE_T BytesRead = 0;
+	while (!done)
+	{
+		BytesRead = 0;
+		SilentReadProcess(hProcess, (PVOID)((uintptr_t)ParamAlloc + offsetof(MANUAL_MAP_MAIN, Done)), &done, sizeof(DWORD), &BytesRead);
+		Sleep(10);
+	}
+	Sleep(150);
 
 	std::vector<uint8_t> ZeroBuffer(DllSizeOfHeaders, 0);
 	SilientProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfHeaders, PAGE_READWRITE, &OldProtect);
-	SilentWriteProcess(hProcess, &VirtualAllocateDll, ZeroBuffer.data(), DllSizeOfHeaders, 0);
+	SilentWriteProcess(hProcess, VirtualAllocateDll, ZeroBuffer.data(), DllSizeOfHeaders, 0);
 	SilientProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfHeaders, OldProtect, &OldProtect);
 
 	SilentFreeAllocate(hProcess, &ShellCodeAlloc);
 
+	SilentCloseHandle(hThread);
 	SilentCloseHandle(hProcess);
 	output = "[+] DLL была успешно внедрена в EXE";
 	return MemoryAllocate;

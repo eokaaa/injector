@@ -88,7 +88,7 @@ bool SilentOpenThread(DWORD hTargetModule, HANDLE* pOutTargetProcessHandle)
 	ClientId.UniqueProcess = NULL;
 	ClientId.UniqueThread  = (HANDLE)(uintptr_t)hTargetModule;
 
-	auto Mask = THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT;
+	auto Mask = THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | SYNCHRONIZE;
 	HANDLE hThread = NULL;
 
 	NTSTATUS Status = NtOpenThread(&hThread, Mask, &obj, &ClientId);
@@ -140,6 +140,26 @@ LPVOID SilentAllocate(HANDLE hProcess, PVOID* BaseAddress, ULONG_PTR ZeroBits, P
 		return 0;
 
 	return *BaseAddress;
+}
+
+
+bool SilentReadProcess(HANDLE hProcess, PVOID BaseAddress, PVOID Buffer, SIZE_T NumberOfBytesToRead, PSIZE_T NumberOfBytesRead)
+{
+	if (!hProcess || !BaseAddress ||
+		!Buffer || !NumberOfBytesToRead)
+		return false;
+
+	HMODULE hNtModule = SilentSearchDll("ntdll.dll");
+	if (!hNtModule)
+		return false;
+
+	pfnNtReadVirtualMemory NtReadVirtualMemory = (pfnNtReadVirtualMemory)GetProcAddressByName(hNtModule, "NtReadVirtualMemory");
+	if (!NtReadVirtualMemory)
+		return false;
+
+	NTSTATUS Status = NtReadVirtualMemory(hProcess, BaseAddress, Buffer, NumberOfBytesToRead, NumberOfBytesRead);
+
+	return (Status >= 0);
 }
 
 bool SilentWriteProcess(HANDLE hProcess, PVOID BaseAddress, PVOID Buffer, ULONG NumberOfBytesToWrite, PULONG NumberOfBytesWritten)
@@ -197,7 +217,7 @@ bool SilientProtectMemory(HANDLE hProcess, PVOID* BaseAddress, SIZE_T pSize, ULO
 	if (!NtProtectVirtualMemory)
 		return false;
 
-	PVOID CopyBaseAddress = BaseAddress;
+	PVOID CopyBaseAddress = *BaseAddress;
 	SIZE_T CopySize = pSize;
 
 	NTSTATUS Status = NtProtectVirtualMemory(hProcess, &CopyBaseAddress, &CopySize, NewProtect, pOldProtect);
@@ -296,7 +316,7 @@ bool GetStructFile(std::wstring& wstr, std::vector<uint8_t>& FileStruct)
 	return false;
 }
 
-bool ChangeValidAddress(uintptr_t AllocBase, uintptr_t PreferedBase, uintptr_t LocalImage, IMAGE_DATA_DIRECTORY RelocData)
+bool ParseReloc(uintptr_t AllocBase, uintptr_t PreferedBase, uintptr_t LocalImage, IMAGE_DATA_DIRECTORY RelocData)
 {
 	if (AllocBase == 0 || PreferedBase == 0 || RelocData.VirtualAddress == 0)
 		return false;
@@ -312,6 +332,10 @@ bool ChangeValidAddress(uintptr_t AllocBase, uintptr_t PreferedBase, uintptr_t L
 
 	while ((uintptr_t)reloc < EndReloc && EndReloc > 0)
 	{
+		if (reloc->SizeOfBlock <= sizeof(IMAGE_BASE_RELOCATION) || 
+			((uintptr_t)reloc + reloc->SizeOfBlock) > EndReloc)
+			break;
+
 		size_t EntryByte = (reloc->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(uint16_t);
 
 		uint16_t* ArrayByte = (uint16_t*)((uintptr_t)reloc + sizeof(IMAGE_BASE_RELOCATION));
@@ -359,7 +383,7 @@ bool CreateLocalImage(std::vector<uint8_t>& LocalImage, std::vector<uint8_t>& Ex
 	}
 	else
 	{
-		auto ExternINT32 = (IMAGE_NT_HEADERS64*)ExternINT;
+		auto ExternINT32 = (IMAGE_NT_HEADERS32*)ExternINT;
 		SizeOfImage = ExternINT32->OptionalHeader.SizeOfImage;
 		SizeOfHeaders = ExternINT32->OptionalHeader.SizeOfHeaders;
 	}
@@ -464,7 +488,7 @@ uintptr_t GetProcAddressByOrdinal(HMODULE DllModule, uintptr_t TargetOrdinal)
 		FuncRVA < pDataExport.VirtualAddress + pDataExport.Size)
 		return 0;
 
-	return (uintptr_t)(pBase + FuncRVA);
+	return (uintptr_t)(FuncRVA);
 }
 
 
@@ -488,63 +512,43 @@ uintptr_t GetProcRVAByName(HMODULE DllModule, const char* lpProcName, const std:
 
 	PIMAGE_EXPORT_DIRECTORY pExport = (PIMAGE_EXPORT_DIRECTORY)(pBase + pDataExport.VirtualAddress);
 
-	DWORD* AddressOfFunctions	 = (DWORD*)(pBase + pExport->AddressOfFunctions); // массив RVA-адресов
-	DWORD* AddressOfNames		 = (DWORD*)(pBase + pExport->AddressOfNames); //  массив RVA-адресов со строками имен
-	WORD*  AddressOfNameOrdinals = (WORD*)(pBase + pExport->AddressOfNameOrdinals); // массив номеров
+	DWORD* AddressOfFunctions	 = (DWORD*)(pBase + pExport->AddressOfFunctions);
+	DWORD* AddressOfNames		 = (DWORD*)(pBase + pExport->AddressOfNames);
+	WORD*  AddressOfNameOrdinals = (WORD*)(pBase + pExport->AddressOfNameOrdinals);
 
 	std::vector<uint8_t> LocalFwdRaw;
 	for (int i = 0; i < pExport->NumberOfNames; ++i)
 	{
-		const char* CurrentName = (const char*)(pBase + AddressOfNames[i]);
+		if (strcmp(lpProcName, (const char*)(pBase + AddressOfNames[i])) != 0)
+			continue;
+		
+		WORD Ordinal = AddressOfNameOrdinals[i];
 
-		if (strcmp(lpProcName, CurrentName) == 0)
+		DWORD FunctionRVA = AddressOfFunctions[Ordinal];
+
+		if (FunctionRVA >= pDataExport.VirtualAddress &&
+			FunctionRVA < pDataExport.VirtualAddress + pDataExport.Size)
 		{
-			WORD Ordinal = AddressOfNameOrdinals[i];
+			std::string Fwd = (const char*)(pBase + FunctionRVA);
+			size_t DotPos = Fwd.find('.');
 
-			DWORD FunctionRVA = AddressOfFunctions[Ordinal];
+			if (DotPos == std::string::npos)
+				return 0;
 
-			if (FunctionRVA >= pDataExport.VirtualAddress &&
-				FunctionRVA < pDataExport.VirtualAddress + pDataExport.Size)
-			{
-				const char* ForwardStr = (const char*)(pBase + FunctionRVA);
+			std::string TargetName = Fwd.substr(0, DotPos) + ".dll";
+			std::string FuncName   = Fwd.substr(DotPos + 1);
 
-				std::string Fwd(ForwardStr);
-				size_t DotPos = Fwd.find('.');
-
-				if (DotPos != std::string::npos)
-				{
-					std::string TargetName = Fwd.substr(0, DotPos) + ".DLL";
-					std::string FuncName   = Fwd.substr(DotPos + 1);
-
-					HMODULE ModuleDll = SilentSearchDll(TargetName.c_str());
-					if (!ModuleDll)
-					{
-						std::wstring FwdDir = UniversalFileExists(TargetName.c_str(), PathExe);
-						if (!FwdDir.empty())
-						{
-							std::vector<uint8_t> FwdRaw;
-							if (GetStructFile(FwdDir, FwdRaw))
-							{
-								CreateLocalImage(LocalFwdRaw, FwdRaw);
-
-								uintptr_t FwdRemoteBase = (uintptr_t)LocalFwdRaw.data();
-								if (FwdRemoteBase)
-									ModuleDll = (HMODULE)LocalFwdRaw.data();
-							}
-						}
-					}
-
-					if (ModuleDll)
-					{
-						DWORD RefRVA = GetProcRVAByName(ModuleDll, FuncName.c_str(), PathExe);
-						if (RefRVA != 0)
-							return RefRVA;
-					}
-				}
-			}
-
-			return (uintptr_t)(FunctionRVA);
+			HMODULE TargetDll = SilentSearchDll(TargetName.c_str());
+			if (!TargetDll)
+				return 0;
+			
+			uintptr_t AbsAddr = GetProcAddressByName(TargetDll, FuncName.c_str(), PathExe);
+			if (!AbsAddr)
+				return 0;
+			return (DWORD)(AbsAddr - (uintptr_t)DllModule);
 		}
+
+		return (uintptr_t)(FunctionRVA);
 	}
 
 	return 0;
@@ -670,7 +674,95 @@ std::wstring UniversalFileExists(const char* DllName, const std::wstring& GameFo
 	return L"";
 }
 
-bool ParseImports(IMAGE_DATA_DIRECTORY ImportData, uintptr_t LocalImageData, DWORD pid, std::wstring& PathDll, std::string& output, std::wstring PathExe)
+uintptr_t MapModules(HANDLE hProcess, std::vector<uint8_t>& DepFileStruct, std::wstring PathExe,std::wstring PathDll, std::string& NameDll, std::string& output)
+{
+	std::vector<uint8_t> ExeFileStruct;
+	if (!GetStructFile(PathExe, ExeFileStruct))
+		return false;
+
+	IMAGE_DOS_HEADER* ExeImageDOS = reinterpret_cast<IMAGE_DOS_HEADER*>(ExeFileStruct.data());
+	IMAGE_NT_HEADERS* ExeImageNT = reinterpret_cast<IMAGE_NT_HEADERS*>(ExeFileStruct.data() + ExeImageDOS->e_lfanew);
+
+	IMAGE_DOS_HEADER* DllImageDOS = reinterpret_cast<IMAGE_DOS_HEADER*>(DepFileStruct.data());
+	IMAGE_NT_HEADERS* DllImageNT = reinterpret_cast<IMAGE_NT_HEADERS*>(DepFileStruct.data() + DllImageDOS->e_lfanew);
+
+
+	uintptr_t DllImageBase = 0;
+	size_t  DllSizeOfImage = 0;
+	size_t  DllSizeOfHeaders = 0;
+
+	IMAGE_DATA_DIRECTORY RelocData;
+	IMAGE_DATA_DIRECTORY ImportData;
+
+	bool DllIs64 = (DllImageNT->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC);
+
+	if (DllIs64)
+	{
+		auto DllImageNT64 = (IMAGE_NT_HEADERS64*)DllImageNT;
+		DllImageBase = DllImageNT64->OptionalHeader.ImageBase;
+		DllSizeOfImage = DllImageNT64->OptionalHeader.SizeOfImage;
+		DllSizeOfHeaders = DllImageNT64->OptionalHeader.SizeOfHeaders;
+
+		RelocData = DllImageNT64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+		ImportData = DllImageNT64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+	}
+	else
+	{
+		auto DllImageNT32 = (IMAGE_NT_HEADERS32*)DllImageNT;
+		DllImageBase = DllImageNT32->OptionalHeader.ImageBase;
+		DllSizeOfImage = DllImageNT32->OptionalHeader.SizeOfImage;
+		DllSizeOfHeaders = DllImageNT32->OptionalHeader.SizeOfHeaders;
+
+		RelocData = DllImageNT32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+		ImportData = DllImageNT32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+	}
+
+
+	PVOID pBaseAddress = NULL;
+
+	LPVOID VirtualAllocateDll = SilentAllocate(hProcess, &pBaseAddress, 0, &DllSizeOfImage, MEM_COMMIT | MEM_RESERVE);
+	if (!VirtualAllocateDll)
+		return false;
+
+	uintptr_t MemoryAllocate = reinterpret_cast<uintptr_t>(VirtualAllocateDll);
+	MappedModules[NameDll] = MemoryAllocate;
+
+	std::vector<uint8_t> LocalImage(DllSizeOfImage, 0);
+	std::memcpy(LocalImage.data(), DepFileStruct.data(), DllSizeOfHeaders);
+
+	IMAGE_SECTION_HEADER* Sections = IMAGE_FIRST_SECTION(DllImageNT);
+	for (int i = 0; i < DllImageNT->FileHeader.NumberOfSections; ++i, ++Sections)
+	{
+		if (Sections->SizeOfRawData > 0 && Sections->PointerToRawData > 0)
+		{
+			std::memcpy(
+				LocalImage.data() + Sections->VirtualAddress,
+				DepFileStruct.data() + Sections->PointerToRawData,
+				Sections->SizeOfRawData
+			);
+		}
+	}
+
+	uintptr_t LocalImageData = reinterpret_cast<uintptr_t>(LocalImage.data());
+
+	if (!ParseReloc(MemoryAllocate, DllImageBase, LocalImageData, RelocData))
+		return false;
+
+	LocalImagesCache[NameDll] = std::move(LocalImage);
+
+	if (!ParseImports(ImportData, LocalImageData, DllSizeOfImage, hProcess, PathDll, output, PathExe))
+		return false;
+
+	if (!SilentWriteProcess(hProcess, VirtualAllocateDll, LocalImagesCache[NameDll].data(), DllSizeOfImage, 0))
+		return false;
+
+	ULONG OldProtect = 0;
+	SilientProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfImage, PAGE_EXECUTE_READWRITE, &OldProtect);
+
+	return MemoryAllocate;
+}
+
+bool ParseImports(IMAGE_DATA_DIRECTORY ImportData, uintptr_t LocalImageData, DWORD DllSizeOfImage, HANDLE hProcess, std::wstring& PathDll, std::string& output, std::wstring PathExe)
 {
 	if (ImportData.VirtualAddress == 0 || LocalImageData == 0)
 		return false;
@@ -680,52 +772,62 @@ bool ParseImports(IMAGE_DATA_DIRECTORY ImportData, uintptr_t LocalImageData, DWO
 
 	PIMAGE_IMPORT_DESCRIPTOR IAT = (PIMAGE_IMPORT_DESCRIPTOR)StartImport;
 
-	std::vector<uint8_t> LocalDepImage;
 	while (IAT->FirstThunk != 0 && IAT->Name != 0)
 	{
-		const char* NameDll = (const char*)(LocalImageData + IAT->Name);
+		if ((uintptr_t)IAT >= EndImport)
+			break;
+
+		if (IAT->Name == 0 || IAT->Name >= DllSizeOfImage)
+			break;
+
+		uintptr_t NameAddress = LocalImageData + IAT->Name;
+
+		const char* rawDllName = (const char*)NameAddress;
+
+		std::string NameDll((const char*)(LocalImageData + IAT->Name));
 
 		PIMAGE_THUNK_DATA ThunkData = (PIMAGE_THUNK_DATA)(LocalImageData + IAT->FirstThunk);
 
 		uintptr_t OriginalThunkDataRVA = IAT->OriginalFirstThunk ? IAT->OriginalFirstThunk : IAT->FirstThunk;
 		PIMAGE_THUNK_DATA OriginalThunkData = (PIMAGE_THUNK_DATA)(LocalImageData + OriginalThunkDataRVA);
 
-		HMODULE ModuleDll = SilentSearchDll(NameDll);
-		uintptr_t RemoteModuleBase = (uintptr_t)ModuleDll;
-		HMODULE LocalModule = ModuleDll;
+		for (auto& ch : NameDll)
+			ch = std::tolower(ch);
 
-		if (!ModuleDll)
+		HMODULE ModuleDll = SilentSearchDll(NameDll.c_str());
+		uintptr_t RemoteModuleBase = 0;
+		HMODULE LocalModule = nullptr;
+
+		bool IsLoaded = false;
+
+		if (ModuleDll != nullptr)
 		{
-			std::wstring DifferentPathDll = UniversalFileExists(NameDll, PathExe);
+			RemoteModuleBase = (uintptr_t)ModuleDll;
+			LocalModule = ModuleDll;
+			IsLoaded = true;
+		}
+		else if (MappedModules.contains(NameDll))
+		{
+			RemoteModuleBase = MappedModules[NameDll];
+			LocalModule = (HMODULE)LocalImagesCache[NameDll].data();
+			IsLoaded = false;
+		}
+		else if (!MappedModules.contains(NameDll) && !ModuleDll)
+		{
+			std::wstring DifferentPathDll = UniversalFileExists(NameDll.c_str(), PathExe);
 			if (DifferentPathDll.empty())
-			{
-				output = "[!] Не удалось найти зависимости";
 				return false;
-			}
 
 			std::vector<uint8_t> DepFileStruct;
 			if (!GetStructFile(DifferentPathDll, DepFileStruct))
-			{
-				output = "[!] Не удалось прочитать файл";
 				return false;
-			}
 
-			if (!CreateLocalImage(LocalDepImage, DepFileStruct))
-			{
-				output = "[!] Не удалось загрузить модуль из импорта";
+			RemoteModuleBase = MapModules(hProcess, DepFileStruct, PathExe, PathDll, NameDll, output);
+			if (!RemoteModuleBase)
 				return false;
-			}
-			
-			uintptr_t Mappedbase = ManualMapDllInject(pid, DifferentPathDll, output, PathExe);
-			if (!Mappedbase)
-			{
-				output = "[!] Не удалось замаппить зависимость";
-				return false;
-			}
-			
-			RemoteModuleBase = Mappedbase;
 
-			LocalModule = (HMODULE)LocalDepImage.data();
+			LocalModule = (HMODULE)LocalImagesCache[NameDll].data();
+			IsLoaded = false;
 		}
 
 		while (OriginalThunkData->u1.AddressOfData != 0)
@@ -735,24 +837,50 @@ bool ParseImports(IMAGE_DATA_DIRECTORY ImportData, uintptr_t LocalImageData, DWO
 			if (IMAGE_SNAP_BY_ORDINAL(OriginalThunkData->u1.Ordinal))
 			{
 				WORD ordinal = IMAGE_ORDINAL(OriginalThunkData->u1.Ordinal);
-				FuncAddress = GetProcAddressByOrdinal(LocalModule, ordinal);
-				output = "[!] Функция (N)" + std::to_string(ordinal) + " была не найдена";
+				if (IsLoaded)
+				{
+					DWORD rva = GetProcAddressByOrdinal(LocalModule, ordinal);
+					if (!rva)
+					{
+
+						output = "[!] Функция " + std::to_string(ordinal) + " была не найдена";
+						return false;
+					}
+					FuncAddress = (uintptr_t)LocalModule + rva;
+				}
+				else
+				{
+					DWORD rva = GetProcAddressByOrdinal(LocalModule, ordinal);
+					if (!rva)
+					{
+
+						output = "[!] Функция " + std::to_string(ordinal) + " была не найдена";
+						return false;
+					}
+					FuncAddress = RemoteModuleBase + rva;
+				}
 			}
 			else
 			{
 				PIMAGE_IMPORT_BY_NAME FuncName = (PIMAGE_IMPORT_BY_NAME)(LocalImageData + OriginalThunkData->u1.AddressOfData);
-				FuncAddress = GetProcAddressByName(LocalModule, (const char*)FuncName->Name, PathExe);
-				output = "[!] Функция " + std::string(FuncName->Name) + " была не найдена";
+				
+				if (IsLoaded)
+					FuncAddress = GetProcAddressByName(LocalModule, (const char*)FuncName->Name, PathExe);
+				else
+				{
+					DWORD rva = GetProcRVAByName(LocalModule, (const char*)FuncName->Name, PathExe);
+					FuncAddress = RemoteModuleBase + rva;
+				}
+				
+				if (!FuncAddress)
+				{
+					output = "[!] Функция " + std::string(FuncName->Name) + " была не найдена";
+					return false;
+				}
 			}
 
-			if (!FuncAddress)
-				return false;
 
-			output = "";
-
-			uintptr_t FuncAddressInGame = RemoteModuleBase + FuncAddress;
-
-			ThunkData->u1.Function = FuncAddressInGame;
+			ThunkData->u1.Function = FuncAddress;
 
 			++ThunkData;
 			++OriginalThunkData;
@@ -760,26 +888,7 @@ bool ParseImports(IMAGE_DATA_DIRECTORY ImportData, uintptr_t LocalImageData, DWO
 
 		++IAT;
 	}
+	
 
 	return true;
 }
-
-
-using f_DllMain = BOOL(WINAPI*)(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
-void __stdcall ShellCode(MANUAL_MAP_MAIN* pData)
-{
-	if (!pData || !pData->HinstDLL)
-		return;
-
-	auto pDos = (PIMAGE_DOS_HEADER)pData->HinstDLL;
-	auto pNT = (PIMAGE_NT_HEADERS)((uint8_t*)pData->HinstDLL + pDos->e_lfanew);
-
-	auto pDllName = (f_DllMain)((uint8_t*)pData->HinstDLL + pNT->OptionalHeader.AddressOfEntryPoint);
-
-	pDllName(pData->HinstDLL, pData->FdwReason, pData->lpvReserved);
-
-	typedef void(*f_Jump)(uintptr_t);
-	auto fJumpToOriginal = (f_Jump)pData->RIP;
-}
-
-void __stdcall ShellCodeEnd() {};
