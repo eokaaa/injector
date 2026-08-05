@@ -1,17 +1,20 @@
-#include "../../imgui/imgui.h"
-#include "../../imgui/imgui_impl_win32.h"
-#include "../../imgui/imgui_impl_dx11.h"
-#include "../../imgui/imgui_internal.h"
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_win32.h"
+#include "imgui/imgui_impl_dx11.h"
+#include "imgui/imgui_internal.h"
+
 #include <d3d11.h>
 #include <dwmapi.h>
 #include <filesystem>
 #include <algorithm>
 #include <vector>
-#include "gui.h"
-#include "../search/searchDLL.h"
-#include "../search/searchPID.h"
-#include "../core/dll injection.h"
-#include "../../resource.h"
+
+#include "Gui.h"
+
+#include "sources/Utils/Utils.h"
+
+#include "sources/Core/DLLInjection.h"
+#include "resource.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dwmapi.lib")
@@ -31,6 +34,7 @@ static ID3D11Device* g_pd3dDevice = nullptr;
 static ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain* g_pSwapChain = nullptr;
 static ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
+
 
 // Forward declarations
 bool CreateDeviceD3D(HWND hWnd);
@@ -201,17 +205,21 @@ void window()
             }
             else
             {
-                ImGui::TextColored(ImVec4(0.39f, 0.40f, 0.95f, 1.00f), "[DLL]");
-                ImGui::SameLine();
-                ImGui::TextUnformatted(dllFilename.c_str());
+                if (directoryPathForDll.ends_with(L".dll"))
+                {
+                    ImGui::TextColored(ImVec4(0.39f, 0.40f, 0.95f, 1.00f), "[DLL]");
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted(dllFilename.c_str());
+                }
+                else
+                    ImGui::TextColored(ImVec4(0.48f, 0.50f, 0.56f, 1.00f), "Файл должен быть .dll");
+
             }
 
             ImGui::SameLine(ImGui::GetWindowWidth() - 95.0f);
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() - 4.0f);
             if (ImGui::Button("Обзор...", ImVec2(80, 28)))
-            {
                 directoryPathForDll = openFileDialogForDll(hwnd);
-            }
         }
         ImGui::EndChild();
 
@@ -422,20 +430,27 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     if (ImGui_ImplWin32_WndProcHandler(hWnd, msg, wParam, lParam)) return true;
 
-    switch (msg) {
+    switch (msg) 
+    {
     case WM_SIZE:
+    {
         if (g_pd3dDevice != nullptr && wParam != SIZE_MINIMIZED) {
             CleanupRenderTarget();
             g_pSwapChain->ResizeBuffers(0, (UINT)LOWORD(lParam), (UINT)HIWORD(lParam), DXGI_FORMAT_UNKNOWN, 0);
             CreateRenderTarget();
         }
         return 0;
+    }
     case WM_SYSCOMMAND:
+    {
         if ((wParam & 0xfff0) == SC_KEYMENU) return 0;
         break;
+    }
     case WM_DESTROY:
+    {
         ::PostQuitMessage(0);
         return 0;
+    }
     }
 
     return ::DefWindowProcW(hWnd, msg, wParam, lParam);

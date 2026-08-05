@@ -1,78 +1,7 @@
-#include "../../imgui/imgui.h"
-#include "../../imgui/imgui_impl_win32.h"
-#include "../../imgui/imgui_impl_dx11.h"
-
 #include "ParseModules.h"
-#include "dll injection.h"
+#include "DLLInjection.h"
 
-/*
-bool LoadLibraryDllInject(DWORD pid, std::wstring& directoryPath, std::string& output)
-{
-	if (directoryPath.empty())
-	{
-		output = "[!] При проверки dll произошла ошибка.";
-		return false;
-	}
-
-	// открытие процесса
-	HANDLE hProcess = OpenProcess(PROCESS_ALL_ACCESS, false, pid);
-	if (!hProcess)
-	{
-		output = "[!] При открытии процесса возникла проблема.";
-		return false;
-	}
-
-	// выделение памяти
-	size_t sizeInProcessPathToDll = (directoryPath.length() + 1) * sizeof(wchar_t);
-	LPVOID remoteMemory = VirtualAllocEx(hProcess, nullptr, sizeInProcessPathToDll, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-	if (!remoteMemory)
-	{
-		output = "[!] При выделении памяти возникла проблема.";
-		VirtualFreeEx(hProcess, remoteMemory, 0, MEM_RELEASE);
-		CloseHandle(hProcess);
-		return false;
-	}
-	
-	// запись пути dll 
-	if (!WriteProcessMemory(hProcess, remoteMemory, directoryPath.c_str(), sizeInProcessPathToDll, nullptr))
-	{
-		output = "[!] При записи путя dll возникла проблема.";
-		VirtualFreeEx(hProcess, remoteMemory, 0, MEM_RELEASE);
-		CloseHandle(hProcess);
-		return false;
-	}
-
-	// получаем адрес
-	LPVOID loadLibrary = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW");
-	if (!loadLibrary)
-	{
-		output = "[!] При получении адреса возникла ошибка.";
-		VirtualFreeEx(hProcess, remoteMemory, 0, MEM_RELEASE);
-		CloseHandle(hProcess);
-		return false;
-	}
-
-	// создание удаленного потока, который вызывает loadLibrary с путем dll
-	HANDLE hThread = CreateRemoteThread(hProcess, nullptr, 0,
-		(LPTHREAD_START_ROUTINE)loadLibrary, remoteMemory, 0, nullptr);
-	if (!hThread)
-	{
-		output = "[!] При создании удаленного потока возникла ошибка.";
-		CloseHandle(hProcess);
-		VirtualFreeEx(hProcess, remoteMemory, 0, MEM_RELEASE);
-		return false;
-	}
-
-	WaitForSingleObject(hThread, INFINITE);
-	CloseHandle(hThread);
-	VirtualFreeEx(hProcess, remoteMemory, 0, MEM_RELEASE);
-	CloseHandle(hProcess);
-
-	output = "[+] Инъекция dll прошла успешно";
-	return true;
-}
-*/
-
+#include "sources/Utils/Utils.h"
 
 extern "C" void ShellCode(MANUAL_MAP_MAIN* pData);
 extern "C" void ShellCodeEnd();
@@ -236,7 +165,7 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	}
 
 	ULONG OldProtect = 0;
-	SilientProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfImage, PAGE_EXECUTE_READWRITE, &OldProtect);
+	SilentProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfImage, PAGE_EXECUTE_READWRITE, &OldProtect);
 
 	DWORD TID = GetThreadID(pid);
 	HANDLE hThread;
@@ -244,11 +173,9 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	{
 		output = "[!] При открытии потока произошла ошибка";
 		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
-		CloseHandle(hProcess);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
-
-	ULONG SuspendCount = INFINITE;
 
 	SilentSuspendThread(hThread);
 
@@ -259,7 +186,8 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	{
 		output = "[!] При получении контекста потока произошла ошибка";
 		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
-		CloseHandle(hProcess);
+		SilentCloseHandle(hThread);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
@@ -289,9 +217,12 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		}
 	}
 
-	if (!MapData.RtlAddFunctionTable || !MapData.TLSCallbacks)
+	if (!MapData.RtlAddFunctionTable && ExceptionData.VirtualAddress != 0)
 	{
-		output = "[!] RtlAddFunctionTable/TLSCallbacks не найдена";
+		output = "[!] RtlAddFunctionTable не найдена";
+		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
+		SilentCloseHandle(hThread);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
@@ -307,7 +238,8 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	{
 		output = "[!] Не удалось выделить память для шеллкода";
 		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
-		CloseHandle(hProcess);
+		SilentCloseHandle(hThread);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
@@ -319,16 +251,16 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		output = "[!] Ошибка при записи шеллкода или параметров";
 		SilentFreeAllocate(hProcess, &ShellCodeAlloc);
 		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
-		CloseHandle(hProcess);
+		SilentCloseHandle(hThread);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
-	SilientProtectMemory(hProcess, &ShellCodeAlloc, TotalSize, PAGE_EXECUTE_READWRITE, &OldProtect);
+	SilentProtectMemory(hProcess, &ShellCodeAlloc, TotalSize, PAGE_EXECUTE_READWRITE, &OldProtect);
 
 	uintptr_t RIP = ContextThread.Rip;
 
 	ContextThread.Rcx = (uintptr_t)ParamAlloc;
-	ContextThread.Rsp &= ~0xFull;
 	ContextThread.Rsp -= 0x8;
 	ContextThread.Rip = (uintptr_t)ShellCodeAlloc;
 
@@ -339,7 +271,8 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 		output = "[!] Ошибка при установке контекста";
 		SilentFreeAllocate(hProcess, &ShellCodeAlloc);
 		SilentFreeAllocate(hProcess, &VirtualAllocateDll);
-		CloseHandle(hProcess);
+		SilentCloseHandle(hThread);
+		SilentCloseHandle(hProcess);
 		return false;
 	}
 
@@ -355,10 +288,6 @@ uintptr_t ManualMapDllInject(DWORD pid, std::wstring PathDll, std::string& outpu
 	}
 	Sleep(150);
 
-	std::vector<uint8_t> ZeroBuffer(DllSizeOfHeaders, 0);
-	SilientProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfHeaders, PAGE_READWRITE, &OldProtect);
-	SilentWriteProcess(hProcess, VirtualAllocateDll, ZeroBuffer.data(), DllSizeOfHeaders, 0);
-	SilientProtectMemory(hProcess, &VirtualAllocateDll, DllSizeOfHeaders, OldProtect, &OldProtect);
 
 	SilentFreeAllocate(hProcess, &ShellCodeAlloc);
 

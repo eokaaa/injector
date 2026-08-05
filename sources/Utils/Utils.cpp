@@ -1,13 +1,74 @@
 #include <windows.h>
 #include <tlhelp32.h>
+#include <string>
+#include <codecvt>
+
 #include <psapi.h>
 #include <shellapi.h>
-#include <d3d11.h>
-#include <string>
 #include <algorithm>
 #include <unordered_set>
-#include "searchPID.h"
-#include "searchDLL.h"
+#include <fstream>
+
+#include "Utils.h"
+
+bool GetStructFile(std::wstring& wstr, std::vector<uint8_t>& FileStruct)
+{
+    std::ifstream OpenFile(wstr, std::ios::binary);
+    if (OpenFile.is_open())
+    {
+        OpenFile.seekg(0, OpenFile.end);
+        uint32_t Length = OpenFile.tellg();
+        OpenFile.seekg(0, OpenFile.beg);
+
+        FileStruct.resize(Length);
+        if (OpenFile.read((char*)FileStruct.data(), Length))
+            return true;
+    }
+
+    return false;
+}
+
+bool CreateLocalImage(std::vector<uint8_t>& LocalImage, std::vector<uint8_t>& ExternImage)
+{
+    IMAGE_DOS_HEADER* ExternIDos = (IMAGE_DOS_HEADER*)(ExternImage.data());
+    IMAGE_NT_HEADERS* ExternINT = (IMAGE_NT_HEADERS*)(ExternImage.data() + ExternIDos->e_lfanew);
+    if (ExternIDos->e_magic != IMAGE_DOS_SIGNATURE ||
+        ExternINT->Signature != IMAGE_NT_SIGNATURE)
+        return false;
+
+    DWORD SizeOfImage = 0;
+    DWORD SizeOfHeaders = 0;
+    if (ExternINT->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    {
+        auto ExternINT64 = (IMAGE_NT_HEADERS64*)ExternINT;
+        SizeOfImage = ExternINT64->OptionalHeader.SizeOfImage;
+        SizeOfHeaders = ExternINT64->OptionalHeader.SizeOfHeaders;
+    }
+    else
+    {
+        auto ExternINT32 = (IMAGE_NT_HEADERS32*)ExternINT;
+        SizeOfImage = ExternINT32->OptionalHeader.SizeOfImage;
+        SizeOfHeaders = ExternINT32->OptionalHeader.SizeOfHeaders;
+    }
+
+    LocalImage.resize(SizeOfImage, 0);
+    std::memcpy(LocalImage.data(), ExternImage.data(), SizeOfHeaders);
+
+    IMAGE_SECTION_HEADER* DepSections = IMAGE_FIRST_SECTION(ExternINT);
+    for (int i = 0; i < ExternINT->FileHeader.NumberOfSections; ++i, ++DepSections)
+    {
+        if (DepSections->SizeOfRawData > 0 && DepSections->PointerToRawData > 0)
+        {
+            std::memcpy(
+                LocalImage.data() + DepSections->VirtualAddress,
+                ExternImage.data() + DepSections->PointerToRawData,
+                DepSections->SizeOfRawData
+            );
+        }
+    }
+
+    return true;
+}
 
 static ID3D11ShaderResourceView* CreateTextureFromHICON(ID3D11Device* pd3dDevice, HICON hIcon)
 {
@@ -233,4 +294,45 @@ DWORD findProcessPID(const std::wstring& directoryPath)
 
 	CloseHandle(snapshot);
 	return pid;
+}
+
+std::wstring openFileDialogForDll (HWND hwnd)
+{
+	wchar_t fileName[MAX_PATH] = L"\0";
+
+	OPENFILENAME ofn;
+	ZeroMemory(&ofn, sizeof(ofn));
+
+	ofn.lStructSize = sizeof(ofn);
+	ofn.hwndOwner = hwnd;
+	ofn.lpstrFilter = L"DLL file (*.dll)\0*.dll\0\0";
+	ofn.lpstrFile = fileName;
+	ofn.nMaxFile = MAX_PATH;
+	ofn.Flags = OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
+	ofn.lpstrDefExt = L".dll";
+
+	if (GetOpenFileNameW(&ofn))
+	{
+		std::wstring path = fileName;
+		return fileName;
+	}
+	return L"";
+}
+
+std::string wstringToUtf8(const std::wstring& wstr) 
+{
+	if (wstr.empty()) return std::string();
+	int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(), nullptr, 0, nullptr, nullptr);
+	std::string result(size_needed, 0);
+	WideCharToMultiByte(CP_UTF8, 0, wstr.data(), (int)wstr.size(), &result[0], size_needed, nullptr, nullptr);
+	return result;
+}
+
+std::wstring utf8ToWstring(const std::string& str)
+{
+	if (str.empty()) return std::wstring();
+	int size_needed = MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), nullptr, 0);
+	std::wstring result(size_needed, 0);
+	MultiByteToWideChar(CP_UTF8, 0, str.data(), (int)str.size(), &result[0], size_needed);
+	return result;
 }

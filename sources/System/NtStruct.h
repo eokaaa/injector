@@ -1,9 +1,17 @@
 #pragma once
 
-#include "ParseModules.h"
+#include <windows.h>
+#include <winternl.h>
 
 #pragma comment(lib, "ntdll.lib")
 
+typedef NTSTATUS(NTAPI* pfnNtQueryInformationProcess)(
+	HANDLE ProcessHandle,
+	PROCESSINFOCLASS ProcessInformationClass,
+	PVOID ProcessInformation,
+	ULONG ProcessInformationLength,
+	PULONG ReturnLength
+	);
 
 typedef struct _FULL_LDR_DATA_TABLE_ENTRY
 {
